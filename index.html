@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Telegram Stream Player</title>
+  <meta name="description" content="Stream Telegram videos instantly with full seeking support. No downloads, no storage, just paste and play.">
+  <meta name="theme-color" content="#6366f1">
+  <meta property="og:title" content="Telegram Stream Player">
+  <meta property="og:description" content="Stream Telegram videos instantly with full range-request seeking. Zero storage required.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.plyr.io/3.7.8/plyr.css">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+    :root {
+      --bg: #0a0a0f;
+      --surface: rgba(255, 255, 255, 0.04);
+      --surface-border: rgba(99, 102, 241, 0.15);
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --accent: #6366f1;
+      --accent-light: #818cf8;
+      --accent-vivid: #8b5cf6;
+      --cyan: #06b6d4;
+      --plyr-color-main: #8b5cf6;
+    }
+
+    body {
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      overflow-x: hidden;
+      line-height: 1.6;
+    }
+
+    /* ── Animated Background Orbs ── */
+    .orb {
+      position: fixed;
+      border-radius: 50%;
+      filter: blur(100px);
+      opacity: 0.35;
+      pointer-events: none;
+      z-index: 0;
+    }
+    .orb-1 {
+      width: 500px; height: 500px;
+      background: radial-gradient(circle, #6366f1, transparent 70%);
+      top: -10%; left: -8%;
+      animation: orbFloat1 18s ease-in-out infinite;
+    }
+    .orb-2 {
+      width: 400px; height: 400px;
+      background: radial-gradient(circle, #8b5cf6, transparent 70%);
+      bottom: -5%; right: -5%;
+      animation: orbFloat2 22s ease-in-out infinite;
+    }
+    .orb-3 {
+      width: 350px; height: 350px;
+      background: radial-gradient(circle, #06b6d4, transparent 70%);
+      top: 40%; left: 55%;
+      animation: orbFloat3 20s ease-in-out infinite;
+    }
+
+    @keyframes orbFloat1 {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      33% { transform: translate(60px, 40px) scale(1.1); }
+      66% { transform: translate(-30px, 70px) scale(0.95); }
+    }
+    @keyframes orbFloat2 {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      33% { transform: translate(-50px, -30px) scale(1.08); }
+      66% { transform: translate(40px, -60px) scale(0.92); }
+    }
+    @keyframes orbFloat3 {
+      0%, 100% { transform: translate(0, 0) scale(1); }
+      33% { transform: translate(40px, -50px) scale(1.05); }
+      66% { transform: translate(-60px, 30px) scale(0.97); }
+    }
+
+    /* ── Page Load Animation ── */
+    @keyframes fadeSlideUp {
+      from { opacity: 0; transform: translateY(30px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .animate-in {
+      animation: fadeSlideUp 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+    }
+    .delay-1 { animation-delay: 0.1s; }
+    .delay-2 { animation-delay: 0.25s; }
+    .delay-3 { animation-delay: 0.4s; }
+    .delay-4 { animation-delay: 0.55s; }
+
+    /* ── Layout ── */
+    .wrapper {
+      position: relative;
+      z-index: 1;
+      max-width: 860px;
+      margin: 0 auto;
+      padding: 2.5rem 1.25rem 3rem;
+    }
+
+    /* ── Header ── */
+    header {
+      text-align: center;
+      margin-bottom: 2.5rem;
+    }
+    header h1 {
+      font-size: clamp(1.6rem, 4.5vw, 2.4rem);
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--accent-light), var(--cyan), var(--accent-vivid));
+      background-size: 200% 200%;
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      animation: gradientShift 6s ease infinite;
+      letter-spacing: -0.02em;
+    }
+    header .tagline {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      margin-top: 0.4rem;
+      font-weight: 400;
+    }
+    @keyframes gradientShift {
+      0%, 100% { background-position: 0% 50%; }
+      50% { background-position: 100% 50%; }
+    }
+
+    /* ── Glass Card ── */
+    .glass-card {
+      background: var(--surface);
+      border: 1px solid var(--surface-border);
+      border-radius: 20px;
+      padding: 1.5rem;
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      animation: borderGlow 4s ease-in-out infinite alternate;
+      box-shadow: 0 4px 40px rgba(99, 102, 241, 0.06);
+    }
+    @keyframes borderGlow {
+      0%   { border-color: rgba(99, 102, 241, 0.12); box-shadow: 0 4px 40px rgba(99, 102, 241, 0.04); }
+      100% { border-color: rgba(139, 92, 246, 0.3);  box-shadow: 0 4px 50px rgba(139, 92, 246, 0.1); }
+    }
+
+    /* ── Plyr Overrides ── */
+    .player-wrap {
+      border-radius: 14px;
+      overflow: hidden;
+      background: #000;
+      aspect-ratio: 16 / 9;
+    }
+    .player-wrap video { width: 100%; height: 100%; display: block; }
+
+    .plyr { --plyr-color-main: var(--accent-vivid); }
+    .plyr__control--overlaid {
+      background: rgba(139, 92, 246, 0.85) !important;
+      border-radius: 50%;
+    }
+    .plyr__control--overlaid:hover { background: var(--accent-vivid) !important; }
+    .plyr--video .plyr__controls { background: linear-gradient(transparent, rgba(0,0,0,.75)) !important; }
+
+    .player-placeholder {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      aspect-ratio: 16 / 9;
+      border-radius: 14px;
+      background: rgba(0, 0, 0, 0.4);
+      border: 2px dashed rgba(99, 102, 241, 0.2);
+      color: var(--text-muted);
+      gap: 0.75rem;
+      font-size: 0.95rem;
+    }
+    .player-placeholder i { font-size: 2.5rem; color: var(--accent-light); opacity: 0.6; }
+
+    /* ── Input Row ── */
+    .input-row {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1.25rem;
+    }
+    .input-row input {
+      flex: 1;
+      padding: 0.75rem 1rem;
+      border-radius: 12px;
+      border: 1px solid rgba(99, 102, 241, 0.2);
+      background: rgba(0, 0, 0, 0.35);
+      color: var(--text);
+      font-family: 'Inter', sans-serif;
+      font-size: 0.9rem;
+      outline: none;
+      transition: border-color 0.25s, box-shadow 0.25s;
+    }
+    .input-row input::placeholder { color: var(--text-muted); opacity: 0.6; }
+    .input-row input:focus {
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.35rem;
+      border-radius: 12px;
+      border: none;
+      font-family: 'Inter', sans-serif;
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.25s, background 0.25s;
+      white-space: nowrap;
+    }
+    .btn:hover { transform: translateY(-2px); }
+    .btn:active { transform: translateY(0); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--accent), var(--accent-vivid));
+      color: #fff;
+      box-shadow: 0 4px 20px rgba(99, 102, 241, 0.3);
+    }
+    .btn-primary:hover { box-shadow: 0 6px 28px rgba(99, 102, 241, 0.45); }
+
+    .btn-ghost {
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .btn-ghost:hover {
+      background: rgba(255, 255, 255, 0.1);
+      box-shadow: 0 4px 16px rgba(99, 102, 241, 0.12);
+    }
+
+    /* ── File Info ── */
+    .file-info {
+      display: none;
+      align-items: center;
+      gap: 0.6rem;
+      margin-top: 1rem;
+      padding: 0.65rem 1rem;
+      border-radius: 10px;
+      background: rgba(99, 102, 241, 0.08);
+      border: 1px solid rgba(99, 102, 241, 0.12);
+      font-size: 0.82rem;
+      color: var(--accent-light);
+      word-break: break-all;
+    }
+    .file-info.show { display: flex; }
+    .file-info i { flex-shrink: 0; }
+
+    /* ── Actions ── */
+    .actions {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+      flex-wrap: wrap;
+    }
+    .actions .btn { flex: 1; justify-content: center; min-width: 140px; }
+
+    /* ── Features Grid ── */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1rem;
+      margin-top: 3rem;
+    }
+    .feature-card {
+      background: var(--surface);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 16px;
+      padding: 1.5rem;
+      backdrop-filter: blur(12px);
+      transition: transform 0.25s, border-color 0.3s, box-shadow 0.3s;
+    }
+    .feature-card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(99, 102, 241, 0.25);
+      box-shadow: 0 8px 30px rgba(99, 102, 241, 0.08);
+    }
+    .feature-icon {
+      width: 44px; height: 44px;
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.15rem;
+      margin-bottom: 0.9rem;
+    }
+    .feature-icon.purple { background: rgba(99, 102, 241, 0.12); color: var(--accent-light); }
+    .feature-icon.violet { background: rgba(139, 92, 246, 0.12); color: var(--accent-vivid); }
+    .feature-icon.cyan   { background: rgba(6, 182, 212, 0.12);  color: var(--cyan); }
+    .feature-card h3 { font-size: 1rem; font-weight: 600; margin-bottom: 0.35rem; }
+    .feature-card p  { font-size: 0.82rem; color: var(--text-muted); line-height: 1.55; }
+
+    /* ── Footer ── */
+    footer {
+      text-align: center;
+      margin-top: 3.5rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.04);
+      color: var(--text-muted);
+      font-size: 0.78rem;
+    }
+    footer a {
+      color: var(--accent-light);
+      text-decoration: none;
+    }
+    footer a:hover { text-decoration: underline; }
+    footer .dot { margin: 0 0.5rem; opacity: 0.3; }
+
+    /* ── Toast Notifications ── */
+    .toast-container {
+      position: fixed;
+      top: 1.25rem;
+      right: 1.25rem;
+      z-index: 9999;
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+      pointer-events: none;
+    }
+    .toast {
+      display: flex;
+      align-items: center;
+      gap: 0.65rem;
+      padding: 0.8rem 1.2rem;
+      border-radius: 12px;
+      backdrop-filter: blur(20px);
+      font-size: 0.85rem;
+      font-weight: 500;
+      pointer-events: auto;
+      animation: toastIn 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.35);
+      max-width: 360px;
+    }
+    .toast.success { background: rgba(34, 197, 94, 0.15); border: 1px solid rgba(34, 197, 94, 0.25); color: #86efac; }
+    .toast.error   { background: rgba(239, 68, 68, 0.15); border: 1px solid rgba(239, 68, 68, 0.25); color: #fca5a5; }
+    .toast.info    { background: rgba(99, 102, 241, 0.15); border: 1px solid rgba(99, 102, 241, 0.25); color: var(--accent-light); }
+    .toast.leaving { animation: toastOut 0.3s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+    @keyframes toastIn  { from { opacity: 0; transform: translateX(40px) scale(0.95); } to { opacity: 1; transform: translateX(0) scale(1); } }
+    @keyframes toastOut { from { opacity: 1; transform: translateX(0) scale(1); } to { opacity: 0; transform: translateX(40px) scale(0.9); } }
+
+    /* ── Responsive ── */
+    @media (max-width: 600px) {
+      .wrapper { padding: 1.5rem 1rem 2rem; }
+      .glass-card { padding: 1rem; }
+      .input-row { flex-direction: column; }
+      .actions { flex-direction: column; }
+      .actions .btn { min-width: unset; }
+      .player-wrap { border-radius: 10px; }
+      header h1 { font-size: 1.5rem; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Background Orbs -->
+  <div class="orb orb-1" aria-hidden="true"></div>
+  <div class="orb orb-2" aria-hidden="true"></div>
+  <div class="orb orb-3" aria-hidden="true"></div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <div class="wrapper">
+
+    <!-- Header -->
+    <header class="animate-in delay-1">
+      <h1>📡 Telegram Stream Player</h1>
+      <p class="tagline">Paste a stream URL and play instantly — no downloads, full seeking.</p>
+    </header>
+
+    <!-- Player Card -->
+    <div class="glass-card animate-in delay-2">
+      <div id="playerWrap" class="player-wrap" style="display:none;">
+        <video id="videoPlayer" playsinline controls></video>
+      </div>
+      <div id="placeholder" class="player-placeholder">
+        <i class="fa-solid fa-film"></i>
+        <span>Paste a stream URL below to start playing</span>
+      </div>
+
+      <div class="input-row">
+        <input
+          type="url"
+          id="urlInput"
+          placeholder="https://yourserver.com/stream/FILE_ID?token=..."
+          spellcheck="false"
+          autocomplete="off"
+        >
+        <button class="btn btn-primary" onclick="loadVideo()">
+          <i class="fa-solid fa-play"></i> Load
+        </button>
+      </div>
+
+      <div class="file-info" id="fileInfo">
+        <i class="fa-solid fa-circle-info"></i>
+        <span id="fileInfoText"></span>
+      </div>
+    </div>
+
+    <!-- Action Buttons -->
+    <div class="actions animate-in delay-3">
+      <button class="btn btn-ghost" id="copyBtn" onclick="copyUrl()" disabled>
+        <i class="fa-regular fa-copy" id="copyIcon"></i>
+        <span id="copyLabel">Copy URL</span>
+      </button>
+      <button class="btn btn-ghost" id="openBtn" onclick="openInNewTab()" disabled>
+        <i class="fa-solid fa-arrow-up-right-from-square"></i> Open in Tab
+      </button>
+      <button class="btn btn-ghost" id="shareBtn" onclick="shareUrl()" disabled>
+        <i class="fa-solid fa-share-nodes"></i> Share
+      </button>
+    </div>
+
+    <!-- Features -->
+    <div class="features animate-in delay-4">
+      <div class="feature-card">
+        <div class="feature-icon purple"><i class="fa-solid fa-bolt"></i></div>
+        <h3>Instant Streaming</h3>
+        <p>Videos start playing immediately via a lightweight proxy — no waiting for full downloads.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon violet"><i class="fa-solid fa-arrows-left-right-to-line"></i></div>
+        <h3>Range Support</h3>
+        <p>Full HTTP range-request support lets you seek to any position in the video instantly.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon cyan"><i class="fa-solid fa-cloud"></i></div>
+        <h3>Zero Storage</h3>
+        <p>Nothing is stored on the server. Bytes are proxied directly from Telegram's file servers.</p>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="animate-in delay-4">
+      <span>Telegram Stream Player</span>
+      <span class="dot">·</span>
+      <a href="/health">Health Check</a>
+      <span class="dot">·</span>
+      <span>Powered by FastAPI</span>
+    </footer>
+
+  </div>
+
+  <script src="https://cdn.plyr.io/3.7.8/plyr.js"></script>
+  <script>
+    /* ── State ── */
+    let plyrInstance = null;
+    let currentUrl = '';
+
+    /* ── Toast System ── */
+    function showToast(message, type = 'info') {
+      const container = document.getElementById('toastContainer');
+      const toast = document.createElement('div');
+      toast.className = `toast ${type}`;
+      const icons = { success: 'fa-circle-check', error: 'fa-circle-xmark', info: 'fa-circle-info' };
+      toast.innerHTML = `<i class="fa-solid ${icons[type] || icons.info}"></i><span>${message}</span>`;
+      container.appendChild(toast);
+      setTimeout(() => {
+        toast.classList.add('leaving');
+        toast.addEventListener('animationend', () => toast.remove());
+      }, 3000);
+    }
+
+    /* ── Extract File Info ── */
+    function extractFileInfo(url) {
+      try {
+        const u = new URL(url);
+        const parts = u.pathname.split('/').filter(Boolean);
+        const streamIdx = parts.indexOf('stream');
+        if (streamIdx !== -1 && parts[streamIdx + 1]) {
+          return `File ID: ${parts[streamIdx + 1]}`;
+        }
+        return `Path: ${u.pathname}`;
+      } catch {
+        return url;
+      }
+    }
+
+    /* ── Load Video ── */
+    function loadVideo() {
+      const input = document.getElementById('urlInput');
+      const url = input.value.trim();
+      if (!url) {
+        showToast('Please enter a stream URL.', 'error');
+        input.focus();
+        return;
+      }
+
+      try {
+        new URL(url);
+      } catch {
+        showToast('Invalid URL format.', 'error');
+        return;
+      }
+
+      currentUrl = url;
+
+      const playerWrap = document.getElementById('playerWrap');
+      const placeholder = document.getElementById('placeholder');
+      const video = document.getElementById('videoPlayer');
+      const fileInfo = document.getElementById('fileInfo');
+      const fileInfoText = document.getElementById('fileInfoText');
+
+      placeholder.style.display = 'none';
+      playerWrap.style.display = 'block';
+      video.src = url;
+
+      /* Initialize or update Plyr */
+      if (plyrInstance) {
+        plyrInstance.destroy();
+      }
+      plyrInstance = new Plyr(video, {
+        captions: { active: false },
+        quality: { default: 1080 },
+        speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 2] },
+        keyboard: { focused: true, global: true },
+        tooltips: { controls: true, seek: true },
+        invertTime: false,
+        seekTime: 10
+      });
+
+      /* Error handling */
+      video.onerror = function () {
+        showToast('Failed to load video. Check the URL and try again.', 'error');
+      };
+
+      plyrInstance.on('ready', () => {
+        showToast('Video loaded successfully!', 'success');
+      });
+
+      /* Show file info */
+      fileInfoText.textContent = extractFileInfo(url);
+      fileInfo.classList.add('show');
+
+      /* Enable action buttons */
+      document.getElementById('copyBtn').disabled = false;
+      document.getElementById('openBtn').disabled = false;
+      document.getElementById('shareBtn').disabled = false;
+    }
+
+    /* ── Copy URL ── */
+    function copyUrl() {
+      if (!currentUrl) return;
+      navigator.clipboard.writeText(currentUrl).then(() => {
+        const icon = document.getElementById('copyIcon');
+        const label = document.getElementById('copyLabel');
+        icon.className = 'fa-solid fa-check';
+        label.textContent = 'Copied!';
+        showToast('URL copied to clipboard.', 'success');
+        setTimeout(() => {
+          icon.className = 'fa-regular fa-copy';
+          label.textContent = 'Copy URL';
+        }, 2000);
+      }).catch(() => {
+        showToast('Failed to copy URL.', 'error');
+      });
+    }
+
+    /* ── Open in New Tab ── */
+    function openInNewTab() {
+      if (!currentUrl) return;
+      window.open(currentUrl, '_blank', 'noopener');
+    }
+
+    /* ── Share URL ── */
+    function shareUrl() {
+      if (!currentUrl) return;
+      if (navigator.share) {
+        navigator.share({
+          title: 'Telegram Stream',
+          text: 'Watch this stream:',
+          url: currentUrl
+        }).catch(() => {});
+      } else {
+        navigator.clipboard.writeText(currentUrl).then(() => {
+          showToast('Link copied — share it anywhere!', 'success');
+        }).catch(() => {
+          showToast('Could not share or copy link.', 'error');
+        });
+      }
+    }
+
+    /* ── Init on Page Load ── */
+    document.addEventListener('DOMContentLoaded', () => {
+      /* Enter key loads video */
+      document.getElementById('urlInput').addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          loadVideo();
+        }
+      });
+
+      /* Auto-load from ?url= query parameter */
+      const params = new URLSearchParams(window.location.search);
+      const autoUrl = params.get('url');
+      if (autoUrl) {
+        document.getElementById('urlInput').value = autoUrl;
+        loadVideo();
+      }
+    });
+  </script>
+</body>
+</html>
