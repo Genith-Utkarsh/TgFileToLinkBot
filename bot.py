@@ -307,7 +307,6 @@ def build_application():
     if config.TELEGRAM_API_URL and config.TELEGRAM_API_URL != "https://api.telegram.org":
         builder.base_url(f"{config.TELEGRAM_API_URL}/bot")
         builder.base_file_url(f"{config.TELEGRAM_API_URL}/file/bot")
-        builder.local_mode(True)
     
     if config.PROXY_URL:
         # Pass the proxy to both generic requests and get_updates polling
