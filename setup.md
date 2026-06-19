@@ -202,23 +202,31 @@ docker compose up -d --build
 
 ---
 
-## 7. Deploy to Render
+## 7. Deploy to Koyeb (100% Free)
 
-Render is a great alternative to Railway with a generous free tier. This repository includes a `render.yaml` blueprint for 1-click deployments.
+[Koyeb](https://www.koyeb.com/) offers a generous free tier (Eco instance) that runs Docker containers perfectly.
 
-1. **Push your code to GitHub**.
-2. Go to [Render Dashboard](https://dashboard.render.com/) and click **New+** → **Blueprint**.
-3. Connect your GitHub account and select this repository.
-4. Render will automatically detect the `render.yaml` file.
-5. In the final step before deploying, Render will prompt you to enter the environment variables (like `BOT_TOKEN` and `BASE_URL`).
-   - For `BASE_URL`, leave it blank or dummy first, then copy the URL Render gives your app (e.g., `https://tg-stream-proxy.onrender.com`), go back to the environment variables tab, and update it.
-6. Click **Apply** to deploy!
-
-> **Note on 2GB files:** Render's free tier has 512MB RAM, which might limit how well you can run a Local Telegram Bot API server alongside the proxy. For files under 20MB, it works out of the box perfectly.
+1. Push your code to GitHub.
+2. Sign up on Koyeb and click **Create App**.
+3. Choose **GitHub** and select your repository.
+4. Koyeb will automatically detect the Dockerfile.
+5. In the **Environment Variables** section, add `BOT_TOKEN`, `API_SECRET_TOKEN`, `BASE_URL`, and `ALLOWED_USER_ID`.
+6. Click **Deploy**. Koyeb will give you a free `.koyeb.app` domain. Update your `BASE_URL` to match it.
 
 ---
 
-## 8. Deploy to Heroku
+## 8. Deploy to Hugging Face Spaces (Free)
+
+Hugging Face Spaces provides free Docker hosting with a massive 16GB of RAM.
+
+1. Go to [Hugging Face Spaces](https://huggingface.co/spaces) and click **Create new Space**.
+2. Set the License, choose **Docker** as the SDK, and select **Blank**.
+3. Set the Space hardware to **Free**.
+4. In your Space settings, go to **Variables and secrets**. Add your environment variables (`BOT_TOKEN`, etc.) as **Secrets**.
+5. Upload all the files from this repository to the Space (or clone via Git).
+6. The Dockerfile will automatically build and run the proxy.
+
+## 9. Deploy to Heroku
 
 1. Install the [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli)
 
@@ -244,7 +252,7 @@ heroku logs --tail
 
 ---
 
-## 9. Deploy to a VPS
+## 10. Deploy to a VPS
 
 ### Using systemd (Ubuntu/Debian)
 
@@ -335,7 +343,7 @@ sudo certbot --nginx -d stream.yourdomain.com
 
 ---
 
-## 10. Environment Variables Reference
+## 11. Environment Variables Reference
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -352,7 +360,7 @@ sudo certbot --nginx -d stream.yourdomain.com
 
 ---
 
-## 11. API Endpoints
+## 12. API Endpoints
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -388,7 +396,7 @@ Response:
 
 ---
 
-## 12. Bot Commands
+## 13. Bot Commands
 
 | Command | Description | Access |
 |---------|-------------|--------|
@@ -406,7 +414,7 @@ Response:
 
 ---
 
-## 13. Embedding in Websites
+## 14. Embedding in Websites
 
 The bot sends you a stream URL that can be used directly in HTML:
 
@@ -446,7 +454,7 @@ https://your-domain.com/play/FILE_ID?token=SECRET
 
 ---
 
-## 14. Troubleshooting
+## 15. Troubleshooting
 
 ### Bot not responding
 
