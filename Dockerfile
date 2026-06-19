@@ -1,35 +1,29 @@
-FROM python:3.11-slim
+FROM aiogram/telegram-bot-api:latest
 
-# Prevent Python from buffering stdout/stderr and writing .pyc files
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+USER root
 
-# Install curl for healthcheck, then clean up
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Create non-root user
-RUN groupadd --gid 1000 appuser \
-    && useradd --uid 1000 --gid appuser --shell /bin/bash --create-home appuser
+# Install Python, pip, and supervisord
+RUN apk add --no-cache python3 py3-pip curl supervisor
 
 WORKDIR /app
 
-# Copy and install dependencies first (layer cache optimisation)
+# Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python3 -m pip install --no-cache-dir -r requirements.txt --break-system-packages
 
 # Copy the rest of the application
 COPY . .
 
-# Make sure appuser owns the workdir
-RUN chown -R appuser:appuser /app
+# Create data directory for telegram-bot-api
+RUN mkdir -p /app/telegram-bot-api-data && chmod 777 /app/telegram-bot-api-data
+
+# Set environment variables for the Local Bot API server
+ENV TELEGRAM_API_URL="http://127.0.0.1:8081"
+ENV PORT=8000
+ENV HOST=0.0.0.0
 
 EXPOSE 8000
+EXPOSE 8081
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD curl -f http://localhost:${PORT:-8000}/health || exit 1
-
-USER appuser
-
-CMD ["python", "main.py"]
+# Use supervisord to run both processes
+CMD ["supervisord", "-c", "/app/supervisord.conf"]
