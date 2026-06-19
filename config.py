@@ -26,10 +26,14 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # ── Telegram ─────────────────────────────────────────────────────────
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "")
 ALLOWED_USER_ID: int = int(os.getenv("ALLOWED_USER_ID", "0"))
+PROXY_URL: str = os.getenv("PROXY_URL", "")
 
 # ── Web / Streaming ─────────────────────────────────────────────────
 API_SECRET_TOKEN: str = os.getenv("API_SECRET_TOKEN", "changeme")

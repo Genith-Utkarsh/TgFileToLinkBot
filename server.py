@@ -304,7 +304,7 @@ async def file_info(
 
 
 # ── Main streaming endpoint ─────────────────────────────────────────
-@app.api_route("/stream/{file_id}", methods=["GET", "HEAD"])
+@app.api_route("/stream/{file_id}", methods=["GET", "HEAD"], response_model=None)
 async def stream_video(
     file_id: str,
     request: Request,

@@ -296,11 +296,19 @@ async def _error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> 
 # ── Build the Application object (used by main.py) ─────────────────
 def build_application():
     """Create and return the configured telegram Application instance."""
-    app = (
+    builder = (
         ApplicationBuilder()
         .token(config.BOT_TOKEN)
-        .build()
+        .connect_timeout(30.0)
+        .read_timeout(30.0)
     )
+    
+    if config.PROXY_URL:
+        # Pass the proxy to both generic requests and get_updates polling
+        builder.proxy_url(config.PROXY_URL)
+        builder.get_updates_proxy_url(config.PROXY_URL)
+        
+    app = builder.build()
 
     # Commands
     app.add_handler(CommandHandler("start", _start))
