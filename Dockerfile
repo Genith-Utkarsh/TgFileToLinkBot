@@ -19,6 +19,8 @@ RUN mkdir -p /app/telegram-bot-api-data && chmod 777 /app/telegram-bot-api-data
 
 # Set environment variables for the Local Bot API server
 ENV TELEGRAM_API_URL="http://127.0.0.1:8081"
+ENV TELEGRAM_API_ID="6"
+ENV TELEGRAM_API_HASH="eb06d4abfb49dc3eeb1aeb98ae0f581e"
 ENV PORT=8000
 ENV HOST=0.0.0.0
 
