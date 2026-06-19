@@ -54,10 +54,9 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 MAX_CONNECTIONS: int = int(os.getenv("MAX_CONNECTIONS", "100"))
 
 # ── Telegram File API base ──────────────────────────────────────────
-# All Telegram bot file downloads go through this root.
-TELEGRAM_FILE_API: str = f"https://api.telegram.org/file/bot{BOT_TOKEN}"
-
-
+# Set this to your Local Telegram Bot API server to allow files > 20 MB.
+# e.g. http://localhost:8081
+TELEGRAM_API_URL: str = os.getenv("TELEGRAM_API_URL", "https://api.telegram.org").rstrip("/")
 def validate() -> None:
     """Check critical config values at startup.
 

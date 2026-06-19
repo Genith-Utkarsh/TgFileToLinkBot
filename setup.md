@@ -202,7 +202,23 @@ docker compose up -d --build
 
 ---
 
-## 7. Deploy to Heroku
+## 7. Deploy to Render
+
+Render is a great alternative to Railway with a generous free tier. This repository includes a `render.yaml` blueprint for 1-click deployments.
+
+1. **Push your code to GitHub**.
+2. Go to [Render Dashboard](https://dashboard.render.com/) and click **New+** → **Blueprint**.
+3. Connect your GitHub account and select this repository.
+4. Render will automatically detect the `render.yaml` file.
+5. In the final step before deploying, Render will prompt you to enter the environment variables (like `BOT_TOKEN` and `BASE_URL`).
+   - For `BASE_URL`, leave it blank or dummy first, then copy the URL Render gives your app (e.g., `https://tg-stream-proxy.onrender.com`), go back to the environment variables tab, and update it.
+6. Click **Apply** to deploy!
+
+> **Note on 2GB files:** Render's free tier has 512MB RAM, which might limit how well you can run a Local Telegram Bot API server alongside the proxy. For files under 20MB, it works out of the box perfectly.
+
+---
+
+## 8. Deploy to Heroku
 
 1. Install the [Heroku CLI](https://devcenter.heroku.com/articles/heroku-cli)
 
@@ -228,7 +244,7 @@ heroku logs --tail
 
 ---
 
-## 8. Deploy to a VPS
+## 9. Deploy to a VPS
 
 ### Using systemd (Ubuntu/Debian)
 
@@ -319,7 +335,7 @@ sudo certbot --nginx -d stream.yourdomain.com
 
 ---
 
-## 9. Environment Variables Reference
+## 10. Environment Variables Reference
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
@@ -332,10 +348,11 @@ sudo certbot --nginx -d stream.yourdomain.com
 | `CHUNK_SIZE` | ❌ | `524288` | Proxy chunk size in bytes (512 KB) |
 | `MAX_CONNECTIONS` | ❌ | `100` | httpx connection pool size |
 | `LOG_LEVEL` | ❌ | `INFO` | Logging level: DEBUG, INFO, WARNING, ERROR |
+| `TELEGRAM_API_URL`| ❌ | `https://api.telegram.org` | Custom local Bot API server URL for >20MB support |
 
 ---
 
-## 10. API Endpoints
+## 11. API Endpoints
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
@@ -371,7 +388,7 @@ Response:
 
 ---
 
-## 11. Bot Commands
+## 12. Bot Commands
 
 | Command | Description | Access |
 |---------|-------------|--------|
@@ -389,7 +406,7 @@ Response:
 
 ---
 
-## 12. Embedding in Websites
+## 13. Embedding in Websites
 
 The bot sends you a stream URL that can be used directly in HTML:
 
@@ -429,7 +446,7 @@ https://your-domain.com/play/FILE_ID?token=SECRET
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### Bot not responding
 
@@ -437,10 +454,15 @@ https://your-domain.com/play/FILE_ID?token=SECRET
 - Check the bot is running: `curl http://localhost:8000/health`
 - Check logs: `docker compose logs -f` or `journalctl -u tg-stream -f`
 
-### "Telegram refused the file"
+### "Telegram refused the file" / Files > 20 MB failing
 
-- Telegram Bot API has a **20 MB** file size limit (50 MB with Premium)
-- For larger files, you'd need a userbot setup with Telethon (not in this version)
+- The public Telegram Bot API (`api.telegram.org`) has a hard **20 MB** download limit for bots via `getFile`.
+- **To stream files up to 2 GB:** You must run a [Local Telegram Bot API Server](https://github.com/tdlib/telegram-bot-api) alongside this proxy.
+- Once your local bot API is running (e.g., on port 8081), set the `TELEGRAM_API_URL` environment variable:
+  ```env
+  TELEGRAM_API_URL=http://localhost:8081
+  ```
+- The proxy will automatically switch to `local_mode` and stream the full 2 GB files.
 
 ### Stream URL returns 403
 

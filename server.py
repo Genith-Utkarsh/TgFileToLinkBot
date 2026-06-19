@@ -175,7 +175,7 @@ async def _resolve_telegram_url(file_id: str) -> tuple[str, int]:
             return url, size
 
     client = await _get_client()
-    api_url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/getFile"
+    api_url = f"{config.TELEGRAM_API_URL}/bot{config.BOT_TOKEN}/getFile"
     resp = await client.get(api_url, params={"file_id": file_id})
     if resp.status_code != 200:
         raise HTTPException(status_code=502, detail="Telegram API error.")
@@ -185,7 +185,7 @@ async def _resolve_telegram_url(file_id: str) -> tuple[str, int]:
     result = data["result"]
     file_path: str = result["file_path"]
     file_size: int = result.get("file_size", 0)
-    download_url = f"https://api.telegram.org/file/bot{config.BOT_TOKEN}/{file_path}"
+    download_url = f"{config.TELEGRAM_API_URL}/file/bot{config.BOT_TOKEN}/{file_path}"
 
     # Store in cache
     _url_cache[file_id] = (download_url, file_size, now)

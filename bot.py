@@ -238,8 +238,9 @@ async def _handle_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     except Exception as exc:
         logger.error("Failed to get file from Telegram: %s", exc)
         await msg.reply_text(
-            "⚠️ Telegram refused the file — it may exceed the size limit "
-            "(20 MB for bots, 50 MB with Premium)."
+            "⚠️ Telegram refused the file. By default, the public Telegram API has a 20 MB limit.\n\n"
+            "To stream files up to 2 GB, you must run a **Local Telegram Bot API server** "
+            "and configure the `TELEGRAM_API_URL` environment variable."
         )
         return
 
@@ -302,6 +303,11 @@ def build_application():
         .connect_timeout(30.0)
         .read_timeout(30.0)
     )
+
+    if config.TELEGRAM_API_URL and config.TELEGRAM_API_URL != "https://api.telegram.org":
+        builder.base_url(f"{config.TELEGRAM_API_URL}/bot")
+        builder.base_file_url(f"{config.TELEGRAM_API_URL}/file/bot")
+        builder.local_mode(True)
     
     if config.PROXY_URL:
         # Pass the proxy to both generic requests and get_updates polling
