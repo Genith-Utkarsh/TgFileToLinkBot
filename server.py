@@ -17,6 +17,8 @@ from __future__ import annotations
 import logging
 import os
 import time
+
+import aiofiles
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -158,10 +160,15 @@ async def server_error_handler(request: Request, exc: Exception):
     )
 
 
-# ── Helper: resolve a file_id → Telegram download URL ──────────────
+# ── Helper: resolve a file_id → download URL or local path ─────────
 async def _resolve_telegram_url(file_id: str) -> tuple[str, int]:
-    """Call the Telegram Bot API to turn a file_id into a download URL
-    and return (download_url, file_size).
+    """Call the Telegram Bot API to turn a file_id into a download source
+    and return (source, file_size).
+
+    If the Local Bot API is running in --local mode, file_path will be
+    an absolute filesystem path (e.g. /app/.../file.mp4).  In that case
+    we return the path prefixed with ``local://`` so the streaming
+    endpoint knows to read directly from disk.
 
     Results are cached for 5 minutes to avoid redundant API calls
     (e.g. during seek / range requests on the same file).
@@ -185,15 +192,52 @@ async def _resolve_telegram_url(file_id: str) -> tuple[str, int]:
     result = data["result"]
     file_path: str = result["file_path"]
     file_size: int = result.get("file_size", 0)
-    download_url = f"{config.TELEGRAM_API_URL}/file/bot{config.BOT_TOKEN}/{file_path}"
+
+    # Local Bot API in --local mode returns absolute filesystem paths
+    if file_path.startswith("/"):
+        download_url = f"local://{file_path}"
+        # Get accurate file size from disk
+        if os.path.isfile(file_path):
+            file_size = os.path.getsize(file_path)
+    else:
+        download_url = f"{config.TELEGRAM_API_URL}/file/bot{config.BOT_TOKEN}/{file_path}"
 
     # Store in cache
     _url_cache[file_id] = (download_url, file_size, now)
     return download_url, file_size
 
 
-# ── Helper: stream bytes from Telegram in chunks ───────────────────
-async def _stream_chunks(
+def _is_local(source: str) -> bool:
+    """Return True if *source* points to a local file."""
+    return source.startswith("local://")
+
+
+def _local_path(source: str) -> str:
+    """Strip the local:// prefix and return the filesystem path."""
+    return source[len("local://"):]
+
+
+# ── Helper: stream bytes from a LOCAL file in chunks ───────────────
+async def _stream_local_chunks(
+    path: str,
+    start: int,
+    end: int,
+) -> AsyncGenerator[bytes, None]:
+    """Read the byte range [start, end] from a local file and yield chunks."""
+    remaining = end - start + 1
+    async with aiofiles.open(path, "rb") as f:
+        await f.seek(start)
+        while remaining > 0:
+            chunk_size = min(config.CHUNK_SIZE, remaining)
+            chunk = await f.read(chunk_size)
+            if not chunk:
+                break
+            remaining -= len(chunk)
+            yield chunk
+
+
+# ── Helper: stream bytes from a REMOTE URL in chunks ───────────────
+async def _stream_remote_chunks(
     url: str,
     start: int,
     end: int,
@@ -202,8 +246,6 @@ async def _stream_chunks(
     client = await _get_client()
     headers = {"Range": f"bytes={start}-{end}"}
     async with client.stream("GET", url, headers=headers) as resp:
-        # Telegram may or may not honour Range — if it sends 200 and the
-        # full body we still only forward the slice the browser asked for.
         if resp.status_code in (200, 206):
             bytes_sent = 0
             target = end - start + 1
@@ -284,13 +326,13 @@ async def file_info(
     if config.API_SECRET_TOKEN and token != config.API_SECRET_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid or missing token.")
 
-    download_url, file_size = await _resolve_telegram_url(file_id)
-    content_type = _guess_content_type(download_url)
+    source, file_size = await _resolve_telegram_url(file_id)
+    content_type = _guess_content_type(source)
 
-    # Try HEAD request if file_size is 0
-    if file_size == 0:
+    # Try HEAD request if file_size is 0 and source is remote
+    if file_size == 0 and not _is_local(source):
         client = await _get_client()
-        head = await client.head(download_url, follow_redirects=True)
+        head = await client.head(source, follow_redirects=True)
         cl = head.headers.get("content-length")
         if cl:
             file_size = int(cl)
@@ -317,18 +359,25 @@ async def stream_video(
     if config.API_SECRET_TOKEN and token != config.API_SECRET_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid or missing token.")
 
-    # ── Resolve Telegram URL + file size ────────────────────────────
-    download_url, file_size = await _resolve_telegram_url(file_id)
+    # ── Resolve source (local path or remote URL) + file size ──────
+    source, file_size = await _resolve_telegram_url(file_id)
+    is_local_file = _is_local(source)
+    local_file_path = _local_path(source) if is_local_file else ""
 
-    if file_size == 0:
+    if is_local_file:
+        # Verify the file actually exists on disk
+        if not os.path.isfile(local_file_path):
+            raise HTTPException(status_code=404, detail="File not found on disk.")
+        file_size = os.path.getsize(local_file_path)
+    elif file_size == 0:
         # Fallback: do a HEAD request to get Content-Length from Telegram.
         client = await _get_client()
-        head = await client.head(download_url, follow_redirects=True)
+        head = await client.head(source, follow_redirects=True)
         cl = head.headers.get("content-length")
         if cl:
             file_size = int(cl)
 
-    content_type = _guess_content_type(download_url)
+    content_type = _guess_content_type(source)
 
     # ── HEAD request: return metadata only ──────────────────────────
     if request.method == "HEAD":
@@ -367,8 +416,14 @@ async def stream_video(
             "Cache-Control": "no-cache",
         }
 
+        # Choose the right chunk generator
+        if is_local_file:
+            generator = _stream_local_chunks(local_file_path, start, end)
+        else:
+            generator = _stream_remote_chunks(source, start, end)
+
         return StreamingResponse(
-            _stream_chunks(download_url, start, end),
+            generator,
             status_code=206,
             headers=headers,
             media_type=content_type,
@@ -383,14 +438,18 @@ async def stream_video(
     if file_size > 0:
         headers["Content-Length"] = str(file_size)
 
-    async def _full_stream() -> AsyncGenerator[bytes, None]:
-        client = await _get_client()
-        async with client.stream("GET", download_url) as resp:
-            async for chunk in resp.aiter_bytes(chunk_size=config.CHUNK_SIZE):
-                yield chunk
+    if is_local_file:
+        generator = _stream_local_chunks(local_file_path, 0, file_size - 1 if file_size > 0 else 0)
+    else:
+        async def _full_stream() -> AsyncGenerator[bytes, None]:
+            client = await _get_client()
+            async with client.stream("GET", source) as resp:
+                async for chunk in resp.aiter_bytes(chunk_size=config.CHUNK_SIZE):
+                    yield chunk
+        generator = _full_stream()
 
     return StreamingResponse(
-        _full_stream(),
+        generator,
         status_code=200,
         headers=headers,
         media_type=content_type,
