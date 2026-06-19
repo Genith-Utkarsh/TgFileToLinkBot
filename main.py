@@ -62,16 +62,29 @@ async def _run_uvicorn(shutdown_event: asyncio.Event) -> None:
 
 
 async def _run_bot(shutdown_event: asyncio.Event) -> None:
-    """Start Telegram bot polling until shutdown is requested."""
+    """Start Telegram bot polling until shutdown is requested.
+
+    If the bot fails to start (e.g. invalid token, network error),
+    the error is logged but the web server keeps running.
+    """
     if not config.BOT_TOKEN:
         logger.error("BOT_TOKEN is not set — Telegram bot will NOT start.")
         return
 
     application = build_application()
 
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
+    try:
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(drop_pending_updates=True)  # type: ignore[union-attr]
+    except Exception as exc:
+        logger.error("❌ Bot failed to start: %s", exc)
+        logger.error("   The web server will keep running. Fix your BOT_TOKEN and redeploy.")
+        try:
+            await application.shutdown()
+        except Exception:
+            pass
+        return
 
     logger.info("🤖 Telegram bot is polling …")
 
@@ -79,9 +92,12 @@ async def _run_bot(shutdown_event: asyncio.Event) -> None:
     await shutdown_event.wait()
 
     logger.info("Stopping Telegram bot …")
-    await application.updater.stop()  # type: ignore[union-attr]
-    await application.stop()
-    await application.shutdown()
+    try:
+        await application.updater.stop()  # type: ignore[union-attr]
+        await application.stop()
+        await application.shutdown()
+    except Exception as exc:
+        logger.warning("Error during bot shutdown: %s", exc)
 
 
 async def main() -> None:
@@ -108,24 +124,29 @@ async def main() -> None:
     bot_task = asyncio.create_task(_run_bot(shutdown_event))
     web_task = asyncio.create_task(_run_uvicorn(shutdown_event))
 
-    # Wait for either service to exit (normally the web server shutting
-    # down triggers bot shutdown via the shared event).
+    # Wait for either service to exit.
     done, pending = await asyncio.wait(
         {bot_task, web_task},
         return_when=asyncio.FIRST_COMPLETED,
     )
 
-    # Ensure the other task finishes cleanly.
-    shutdown_event.set()
-    for task in pending:
-        try:
-            await asyncio.wait_for(task, timeout=5.0)
-        except asyncio.TimeoutError:
-            task.cancel()
+    # If only the bot exited (failed/stopped), keep the web server alive.
+    if bot_task in done and web_task in pending:
+        logger.warning("Bot stopped early. Web server continues running.")
+        # Wait for the web server to finish (signal or natural shutdown)
+        await web_task
+    else:
+        # Web server exited — shut everything down.
+        shutdown_event.set()
+        for task in pending:
             try:
-                await task
-            except asyncio.CancelledError:
-                pass
+                await asyncio.wait_for(task, timeout=5.0)
+            except asyncio.TimeoutError:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
     logger.info("✅ Shutdown complete.")
 
