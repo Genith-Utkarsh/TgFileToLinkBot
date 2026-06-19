@@ -27,5 +27,8 @@ ENV HOST=0.0.0.0
 EXPOSE 8000
 EXPOSE 8081
 
+# Clear the base image entrypoint so supervisord can run
+ENTRYPOINT []
+
 # Use supervisord to run both processes
 CMD ["supervisord", "-c", "/app/supervisord.conf"]
