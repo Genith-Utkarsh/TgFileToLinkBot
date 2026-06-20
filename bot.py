@@ -7,11 +7,13 @@ Supports: videos, audio, photos, and documents with video/audio MIME types.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from mimetypes import guess_type
 from urllib.parse import quote
 
+import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -52,13 +54,37 @@ def _is_allowed(user_id: int) -> bool:
 
 def _build_stream_url(file_id: str) -> str:
     """Construct the raw streaming URL for a given Telegram file_id."""
-    return f"{config.BASE_URL}/stream/{file_id}?token={config.API_SECRET_TOKEN}"
+    token = quote(config.API_SECRET_TOKEN, safe="")
+    return f"{config.BASE_URL}/stream/{file_id}?token={token}"
 
 
 def _build_player_url(file_id: str) -> str:
     """Construct a browser player URL that auto-loads the stream."""
     stream = _build_stream_url(file_id)
     return f"{config.BASE_URL}/?url={quote(stream, safe='')}"
+
+
+async def _trigger_preprocess(file_id: str) -> None:
+    """Ask the server to start fixing up the file (fast-start remux) in
+    the background, so it's hopefully ready by the time the user opens
+    the link instead of only starting once they do. Best-effort: any
+    failure here is logged and swallowed — stream_video() in server.py
+    starts the same job itself on first request if this never landed.
+
+    Calls the FastAPI app over loopback (127.0.0.1) rather than the
+    public BASE_URL — both processes run in the same container (see
+    main.py), so this is a same-host call and shouldn't depend on
+    outbound DNS/internet access or round-trip through the public
+    ingress just to talk to itself."""
+    internal_base = f"http://127.0.0.1:{config.PORT}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                f"{internal_base}/internal/preprocess/{file_id}",
+                params={"token": config.API_SECRET_TOKEN},
+            )
+    except Exception as exc:
+        logger.debug("Preprocess trigger skipped for %s: %s", file_id, exc)
 
 
 def _format_size(size_bytes: int | None) -> str:
@@ -139,13 +165,15 @@ async def _about(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not _is_allowed(update.effective_user.id):
         return
     text = (
-        "📡 <b>Telegram Stream Bot</b> v2.0\n\n"
-        "A zero-storage video/audio streaming proxy.\n"
+        "📡 <b>Telegram Stream Bot</b> v2.1\n\n"
+        "A low-storage video/audio streaming proxy.\n"
         "Files are streamed directly from Telegram servers — "
-        "no disk cache, no bandwidth waste.\n\n"
+        "no permanent disk cache, no bandwidth waste.\n\n"
         "🛠 <b>Stack:</b> Python • FastAPI • python-telegram-bot\n"
         "🌐 <b>Player:</b> Plyr.js with range-request seeking\n"
-        "🔒 <b>Auth:</b> Token-based stream URL protection"
+        "🔒 <b>Auth:</b> Token-based stream URL protection\n"
+        "✨ <b>Smooth playback:</b> videos are auto-fixed in the background "
+        "(fast-start remux) so playback doesn't glitch on first frame"
     )
     await update.message.reply_text(text, parse_mode="HTML")  # type: ignore[union-attr]
 
@@ -249,6 +277,10 @@ async def _handle_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     player_url = _build_player_url(file_id)
     size_str = _format_size(tg_file.file_size)
     emoji = _TYPE_EMOJI.get(media_type, "📄")
+
+    # Kick off the fast-start fix in the background — fire-and-forget,
+    # never blocks the reply below. Harmless no-op for audio/photos.
+    asyncio.create_task(_trigger_preprocess(file_id))
 
     # Guess MIME for the informational reply
     mime_guess = guess_type(filename)[0] or "application/octet-stream"

@@ -14,6 +14,7 @@ Key responsibilities:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -30,12 +31,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 import config
+import remux
+import tg_resolve
 
 logger = logging.getLogger(__name__)
-
-# ── Telegram URL resolution cache (TTL = 5 minutes) ────────────────
-_url_cache: dict[str, tuple[str, int, float]] = {}
-_CACHE_TTL = 300  # seconds
 
 # ── Simple in-memory rate limiter ───────────────────────────────────
 _rate_buckets: dict[str, list[float]] = defaultdict(list)
@@ -43,38 +42,19 @@ _RATE_LIMIT = 120   # requests per window
 _RATE_WINDOW = 60   # seconds
 
 
-# ── Shared async HTTP client ───────────────────────────────────────
-_http_client: httpx.AsyncClient | None = None
-
-
-async def _get_client() -> httpx.AsyncClient:
-    global _http_client
-    if _http_client is None or _http_client.is_closed:
-        _http_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
-            follow_redirects=True,
-            limits=httpx.Limits(
-                max_connections=config.MAX_CONNECTIONS,
-                max_keepalive_connections=20,
-            ),
-        )
-    return _http_client
-
-
 # ── Lifespan (replaces deprecated on_event) ────────────────────────
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     """Startup / shutdown lifecycle for the FastAPI app."""
-    # Startup: warm up the HTTP client
+    # Startup: warm up the shared httpx connection pool
     logger.info("Initialising httpx connection pool (max=%d)…", config.MAX_CONNECTIONS)
-    await _get_client()
+    await tg_resolve.get_client()
+    if config.ENABLE_REMUX:
+        logger.info("Fast-start remux enabled — cache dir: %s", config.REMUX_CACHE_DIR)
     yield
-    # Shutdown: close the HTTP client
-    global _http_client
-    if _http_client and not _http_client.is_closed:
-        await _http_client.aclose()
-        _http_client = None
-        logger.info("httpx client closed.")
+    # Shutdown: close the shared HTTP client
+    await tg_resolve.close_client()
+    logger.info("httpx client closed.")
 
 
 # ── FastAPI app ──────────────────────────────────────────────────────
@@ -162,59 +142,25 @@ async def server_error_handler(request: Request, exc: Exception):
 
 # ── Helper: resolve a file_id → download URL or local path ─────────
 async def _resolve_telegram_url(file_id: str) -> tuple[str, int]:
-    """Call the Telegram Bot API to turn a file_id into a download source
-    and return (source, file_size).
-
-    If the Local Bot API is running in --local mode, file_path will be
-    an absolute filesystem path (e.g. /app/.../file.mp4).  In that case
-    we return the path prefixed with ``local://`` so the streaming
-    endpoint knows to read directly from disk.
-
-    Results are cached for 5 minutes to avoid redundant API calls
-    (e.g. during seek / range requests on the same file).
-    """
-    now = time.time()
-
-    # Check cache
-    if file_id in _url_cache:
-        url, size, cached_at = _url_cache[file_id]
-        if now - cached_at < _CACHE_TTL:
-            return url, size
-
-    client = await _get_client()
-    api_url = f"{config.TELEGRAM_API_URL}/bot{config.BOT_TOKEN}/getFile"
-    resp = await client.get(api_url, params={"file_id": file_id})
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail="Telegram API error.")
-    data = resp.json()
-    if not data.get("ok"):
-        raise HTTPException(status_code=404, detail="File not found on Telegram.")
-    result = data["result"]
-    file_path: str = result["file_path"]
-    file_size: int = result.get("file_size", 0)
-
-    # Local Bot API in --local mode returns absolute filesystem paths
-    if file_path.startswith("/"):
-        download_url = f"local://{file_path}"
-        # Get accurate file size from disk
-        if os.path.isfile(file_path):
-            file_size = os.path.getsize(file_path)
-    else:
-        download_url = f"{config.TELEGRAM_API_URL}/file/bot{config.BOT_TOKEN}/{file_path}"
-
-    # Store in cache
-    _url_cache[file_id] = (download_url, file_size, now)
-    return download_url, file_size
+    """Wrap tg_resolve.resolve() and translate failures into the
+    HTTPException FastAPI expects. The actual resolution + caching logic
+    lives in tg_resolve.py so bot.py can share it too (needed to kick off
+    background remux right after upload, before any stream request)."""
+    try:
+        return await tg_resolve.resolve(file_id)
+    except tg_resolve.ResolveError as exc:
+        status = 404 if "not found" in str(exc).lower() else 502
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
 
 
 def _is_local(source: str) -> bool:
     """Return True if *source* points to a local file."""
-    return source.startswith("local://")
+    return tg_resolve.is_local(source)
 
 
 def _local_path(source: str) -> str:
     """Strip the local:// prefix and return the filesystem path."""
-    return source[len("local://"):]
+    return tg_resolve.local_path(source)
 
 
 # ── Helper: stream bytes from a LOCAL file in chunks ───────────────
@@ -243,7 +189,7 @@ async def _stream_remote_chunks(
     end: int,
 ) -> AsyncGenerator[bytes, None]:
     """Fetch the byte range [start, end] from *url* and yield chunks."""
-    client = await _get_client()
+    client = await tg_resolve.get_client()
     headers = {"Range": f"bytes={start}-{end}"}
     async with client.stream("GET", url, headers=headers) as resp:
         if resp.status_code in (200, 206):
@@ -331,7 +277,7 @@ async def file_info(
 
     # Try HEAD request if file_size is 0 and source is remote
     if file_size == 0 and not _is_local(source):
-        client = await _get_client()
+        client = await tg_resolve.get_client()
         head = await client.head(source, follow_redirects=True)
         cl = head.headers.get("content-length")
         if cl:
@@ -343,6 +289,28 @@ async def file_info(
         "content_type": content_type,
         "stream_url": f"/stream/{file_id}?token={token}",
     })
+
+
+# ── Internal: kick off background remux right after upload ─────────
+@app.post("/internal/preprocess/{file_id}")
+async def preprocess(file_id: str, token: str = Query(default="")) -> JSONResponse:
+    """Called by bot.py immediately after a file is received, so the
+    fast-start fix has a head start and is hopefully already cached by
+    the time the user taps the link. Non-fatal if this is never called
+    or fails — stream_video() also self-heals by starting a remux job
+    on first request if no cached copy exists yet."""
+    if config.API_SECRET_TOKEN and token != config.API_SECRET_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid or missing token.")
+
+    if not config.ENABLE_REMUX:
+        return JSONResponse({"status": "disabled"})
+
+    source, _ = await _resolve_telegram_url(file_id)
+    if not remux.is_eligible(source):
+        return JSONResponse({"status": "not_eligible"})
+
+    asyncio.create_task(remux.ensure_remuxed(file_id, source))
+    return JSONResponse({"status": "started", "file_id": file_id})
 
 
 # ── Main streaming endpoint ─────────────────────────────────────────
@@ -371,13 +339,29 @@ async def stream_video(
         file_size = os.path.getsize(local_file_path)
     elif file_size == 0:
         # Fallback: do a HEAD request to get Content-Length from Telegram.
-        client = await _get_client()
+        client = await tg_resolve.get_client()
         head = await client.head(source, follow_redirects=True)
         cl = head.headers.get("content-length")
         if cl:
             file_size = int(cl)
 
     content_type = _guess_content_type(source)
+
+    # ── Fast-start remux ─────────────────────────────────────────────
+    # If a cleaned (moov-relocated) copy already exists, switch onto it —
+    # it flows through the exact same local-file Range-serving path below,
+    # just decodes smoothly instead of glitching. Otherwise kick off a
+    # background job so it's ready next time, and serve the original for
+    # now so playback isn't blocked on the remux finishing.
+    if config.ENABLE_REMUX and remux.is_eligible(local_file_path if is_local_file else source):
+        cached = remux.get_cached_path(file_id)
+        if cached is not None:
+            is_local_file = True
+            local_file_path = str(cached)
+            file_size = cached.stat().st_size
+            content_type = "video/mp4"
+        else:
+            asyncio.create_task(remux.ensure_remuxed(file_id, source))
 
     # ── HEAD request: return metadata only ──────────────────────────
     if request.method == "HEAD":
@@ -442,7 +426,7 @@ async def stream_video(
         generator = _stream_local_chunks(local_file_path, 0, file_size - 1 if file_size > 0 else 0)
     else:
         async def _full_stream() -> AsyncGenerator[bytes, None]:
-            client = await _get_client()
+            client = await tg_resolve.get_client()
             async with client.stream("GET", source) as resp:
                 async for chunk in resp.aiter_bytes(chunk_size=config.CHUNK_SIZE):
                     yield chunk
@@ -459,8 +443,12 @@ async def stream_video(
 # ── Health check ─────────────────────────────────────────────────────
 @app.get("/health")
 async def health() -> dict:
+    remux_files = list(remux.CACHE_DIR.glob("*.mp4")) if config.ENABLE_REMUX else []
     return {
         "status": "ok",
         "version": "2.0.0",
-        "cache_entries": len(_url_cache),
+        "cache_entries": len(tg_resolve._url_cache),
+        "remux_enabled": config.ENABLE_REMUX,
+        "remux_cached_files": len(remux_files),
+        "remux_cache_bytes": sum(f.stat().st_size for f in remux_files),
     }

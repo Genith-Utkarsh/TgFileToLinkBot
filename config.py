@@ -19,12 +19,19 @@ Optional env vars:
     HOST               – Bind address for Uvicorn (default 0.0.0.0).
     LOG_LEVEL          – Python log level name (default INFO).
     MAX_CONNECTIONS    – httpx connection-pool ceiling (default 100).
+    ENABLE_REMUX       – "true" (default) to fix video flicker by remuxing
+                         uploads to fast-start MP4 in the background.
+                         Requires the `ffmpeg` binary to be installed.
+    REMUX_CACHE_DIR    – Where fixed copies are cached (default /tmp/stream_cache).
+    REMUX_CACHE_MAX_GB – Max total size of that cache before old entries
+                         are evicted, in GB (default 8).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import shutil
 import sys
 from dotenv import load_dotenv
 
@@ -52,6 +59,12 @@ LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # ── httpx connection pool ────────────────────────────────────────────
 MAX_CONNECTIONS: int = int(os.getenv("MAX_CONNECTIONS", "100"))
+
+# ── Fast-start remux (fixes the "video glitches/flashes from frame one"
+# issue that affects most phone-recorded MP4s — see remux.py) ───────
+ENABLE_REMUX: bool = os.getenv("ENABLE_REMUX", "true").lower() in ("1", "true", "yes")
+REMUX_CACHE_DIR: str = os.getenv("REMUX_CACHE_DIR", "/tmp/stream_cache")
+REMUX_CACHE_MAX_BYTES: int = int(float(os.getenv("REMUX_CACHE_MAX_GB", "8")) * 1024 ** 3)
 
 # ── Telegram File API base ──────────────────────────────────────────
 # Set this to your Local Telegram Bot API server to allow files > 20 MB.
@@ -81,4 +94,12 @@ def validate() -> None:
         logger.warning(
             "ALLOWED_USER_ID is 0 — the bot will accept uploads from ALL users. "
             "Set this to your Telegram numeric ID for single-user mode."
+        )
+
+    if ENABLE_REMUX and shutil.which("ffmpeg") is None:
+        logger.warning(
+            "ENABLE_REMUX is true but the `ffmpeg` binary was not found on PATH. "
+            "Videos will keep streaming with the original flicker issue until "
+            "ffmpeg is installed — see deployment notes (packages.txt / Dockerfile) "
+            "for your Hugging Face Space. Set ENABLE_REMUX=false to silence this."
         )
