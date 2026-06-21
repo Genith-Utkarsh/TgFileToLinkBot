@@ -31,6 +31,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 import config
+import hls
 import remux
 import tg_resolve
 
@@ -51,6 +52,11 @@ async def _lifespan(app: FastAPI):
     await tg_resolve.get_client()
     if config.ENABLE_REMUX:
         logger.info("Fast-start remux enabled — cache dir: %s", config.REMUX_CACHE_DIR)
+    if config.ENABLE_HLS:
+        logger.info(
+            "HLS packaging enabled — cache dir: %s, segment length: %ds",
+            config.HLS_CACHE_DIR, config.HLS_SEGMENT_SECONDS,
+        )
     yield
     # Shutdown: close the shared HTTP client
     await tg_resolve.close_client()
@@ -252,13 +258,30 @@ async def root():
 
 # ── Player redirect (convenience) ──────────────────────────────────
 @app.get("/play/{file_id}")
-async def player_redirect(file_id: str, token: str = Query(default="")):
-    """Redirect to the web player with the stream URL pre-filled."""
+async def player_redirect(
+    file_id: str,
+    token: str = Query(default=""),
+    mode: str = Query(default="auto"),
+):
+    """Redirect to the web player with a stream URL pre-filled.
+
+    mode=auto (default) — prefer the HLS manifest when this file is
+    HLS-eligible and HLS is enabled; mode=direct always uses the raw
+    proxy link instead."""
     from urllib.parse import quote
-    stream_url = f"/stream/{file_id}?token={quote(token, safe='')}"
+
+    target_url = f"/stream/{file_id}?token={quote(token, safe='')}"
+    if mode != "direct" and config.ENABLE_HLS:
+        try:
+            source, _ = await _resolve_telegram_url(file_id)
+            if hls.is_eligible(source):
+                target_url = f"/hls/{file_id}/{hls.PLAYLIST_NAME}?token={quote(token, safe='')}"
+        except HTTPException:
+            pass
+
     return Response(
         status_code=307,
-        headers={"Location": f"/?url={quote(stream_url, safe='')}"},
+        headers={"Location": f"/?url={quote(target_url, safe='')}"},
     )
 
 
@@ -288,29 +311,100 @@ async def file_info(
         "file_size": file_size,
         "content_type": content_type,
         "stream_url": f"/stream/{file_id}?token={token}",
+        "hls_url": f"/hls/{file_id}/{hls.PLAYLIST_NAME}?token={token}" if config.ENABLE_HLS else None,
     })
 
 
-# ── Internal: kick off background remux right after upload ─────────
+# ── Internal: kick off background remux + HLS packaging after upload ─
 @app.post("/internal/preprocess/{file_id}")
 async def preprocess(file_id: str, token: str = Query(default="")) -> JSONResponse:
-    """Called by bot.py immediately after a file is received, so the
-    fast-start fix has a head start and is hopefully already cached by
-    the time the user taps the link. Non-fatal if this is never called
-    or fails — stream_video() also self-heals by starting a remux job
-    on first request if no cached copy exists yet."""
+    """Called by bot.py immediately after a file is received, so both
+    fixes have a head start and are hopefully already cached by the
+    time the user taps the link. Non-fatal if this is never called or
+    fails — stream_video() and the HLS endpoints below both self-heal
+    by starting their own job on first request if nothing is cached yet."""
     if config.API_SECRET_TOKEN and token != config.API_SECRET_TOKEN:
         raise HTTPException(status_code=403, detail="Invalid or missing token.")
 
-    if not config.ENABLE_REMUX:
-        return JSONResponse({"status": "disabled"})
-
     source, _ = await _resolve_telegram_url(file_id)
-    if not remux.is_eligible(source):
-        return JSONResponse({"status": "not_eligible"})
+    started = []
 
-    asyncio.create_task(remux.ensure_remuxed(file_id, source))
-    return JSONResponse({"status": "started", "file_id": file_id})
+    if config.ENABLE_REMUX and remux.is_eligible(source):
+        asyncio.create_task(remux.ensure_remuxed(file_id, source))
+        started.append("remux")
+
+    if config.ENABLE_HLS and hls.is_eligible(source):
+        asyncio.create_task(hls.ensure_packaged(file_id, source))
+        started.append("hls")
+
+    if not started:
+        return JSONResponse({"status": "not_eligible"})
+    return JSONResponse({"status": "started", "jobs": started, "file_id": file_id})
+
+
+# ── HLS: playlist + segment delivery ────────────────────────────────
+@app.get("/hls/{file_id}/" + hls.PLAYLIST_NAME)
+async def hls_playlist(file_id: str, token: str = Query(default="")) -> Response:
+    """Serve the cached VOD playlist, rewriting each segment line to
+    carry the auth token as a query param — players resolve those URIs
+    relative to this manifest's own URL, so the token has to live in
+    the manifest itself rather than relying on the player to add it."""
+    if config.API_SECRET_TOKEN and token != config.API_SECRET_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid or missing token.")
+
+    if not config.ENABLE_HLS:
+        raise HTTPException(status_code=404, detail="HLS is disabled on this server.")
+
+    playlist = hls.get_playlist_path(file_id)
+    if playlist is None:
+        source, _ = await _resolve_telegram_url(file_id)
+        if not hls.is_eligible(source):
+            raise HTTPException(status_code=404, detail="This file type can't be packaged as HLS.")
+        asyncio.create_task(hls.ensure_packaged(file_id, source))
+        return JSONResponse(
+            status_code=202,
+            content={
+                "status": hls.status(file_id),
+                "detail": "HLS package is being prepared. Retry in a few seconds.",
+            },
+        )
+
+    raw = playlist.read_text(errors="ignore")
+    lines = []
+    for line in raw.splitlines():
+        if line and not line.startswith("#"):
+            sep = "&" if "?" in line else "?"
+            line = f"{line}{sep}token={token}"
+        lines.append(line)
+    body = "\n".join(lines) + "\n"
+    return Response(
+        content=body,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/hls/{file_id}/{segment_name}")
+async def hls_segment(file_id: str, segment_name: str, token: str = Query(default="")) -> FileResponse:
+    """Serve a single .ts segment from the cache. segment_name is
+    strictly validated by hls.get_segment_path() against path traversal
+    before ever touching the filesystem."""
+    if config.API_SECRET_TOKEN and token != config.API_SECRET_TOKEN:
+        raise HTTPException(status_code=403, detail="Invalid or missing token.")
+    if not config.ENABLE_HLS:
+        raise HTTPException(status_code=404, detail="HLS is disabled on this server.")
+    if not segment_name.endswith(".ts"):
+        raise HTTPException(status_code=404, detail="Not found.")
+
+    path = hls.get_segment_path(file_id, segment_name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="Segment not found or no longer cached.")
+
+    return FileResponse(
+        path,
+        media_type="video/mp2t",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
 
 
 # ── Main streaming endpoint ─────────────────────────────────────────
@@ -444,6 +538,7 @@ async def stream_video(
 @app.get("/health")
 async def health() -> dict:
     remux_files = list(remux.CACHE_DIR.glob("*.mp4")) if config.ENABLE_REMUX else []
+    hls_dirs = [d for d in hls.CACHE_DIR.iterdir() if d.is_dir() and not d.name.startswith(".")] if config.ENABLE_HLS else []
     return {
         "status": "ok",
         "version": "2.0.0",
@@ -451,4 +546,7 @@ async def health() -> dict:
         "remux_enabled": config.ENABLE_REMUX,
         "remux_cached_files": len(remux_files),
         "remux_cache_bytes": sum(f.stat().st_size for f in remux_files),
+        "hls_enabled": config.ENABLE_HLS,
+        "hls_cached_packages": len(hls_dirs),
+        "hls_cache_bytes": sum(hls._dir_size(d) for d in hls_dirs),
     }

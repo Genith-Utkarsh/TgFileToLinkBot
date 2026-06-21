@@ -13,7 +13,6 @@ import time
 from mimetypes import guess_type
 from urllib.parse import quote
 
-import httpx
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -24,6 +23,9 @@ from telegram.ext import (
 )
 
 import config
+import hls
+import remux
+import tg_resolve
 
 logger = logging.getLogger(__name__)
 
@@ -54,8 +56,7 @@ def _is_allowed(user_id: int) -> bool:
 
 def _build_stream_url(file_id: str) -> str:
     """Construct the raw streaming URL for a given Telegram file_id."""
-    token = quote(config.API_SECRET_TOKEN, safe="")
-    return f"{config.BASE_URL}/stream/{file_id}?token={token}"
+    return f"{config.BASE_URL}/stream/{file_id}?token={config.API_SECRET_TOKEN}"
 
 
 def _build_player_url(file_id: str) -> str:
@@ -64,27 +65,35 @@ def _build_player_url(file_id: str) -> str:
     return f"{config.BASE_URL}/?url={quote(stream, safe='')}"
 
 
-async def _trigger_preprocess(file_id: str) -> None:
-    """Ask the server to start fixing up the file (fast-start remux) in
-    the background, so it's hopefully ready by the time the user opens
-    the link instead of only starting once they do. Best-effort: any
-    failure here is logged and swallowed — stream_video() in server.py
-    starts the same job itself on first request if this never landed.
+def _build_hls_url(file_id: str) -> str:
+    """Construct the HLS manifest URL for a given Telegram file_id."""
+    return f"{config.BASE_URL}/hls/{file_id}/{hls.PLAYLIST_NAME}?token={config.API_SECRET_TOKEN}"
 
-    Calls the FastAPI app over loopback (127.0.0.1) rather than the
-    public BASE_URL — both processes run in the same container (see
-    main.py), so this is a same-host call and shouldn't depend on
-    outbound DNS/internet access or round-trip through the public
-    ingress just to talk to itself."""
-    internal_base = f"http://127.0.0.1:{config.PORT}"
+
+def _build_hls_player_url(file_id: str) -> str:
+    """Construct a browser player URL that loads the HLS manifest via hls.js."""
+    return f"{config.BASE_URL}/?url={quote(_build_hls_url(file_id), safe='')}"
+
+
+async def _start_background_jobs(file_id: str, media_type: str) -> None:
+    """Kick off fast-start remux + HLS packaging right away, so both are
+    hopefully ready by the time the user taps a link instead of only
+    starting once they do. bot.py and server.py share one event loop
+    (see main.py) so this calls straight into remux.py/hls.py — no
+    network round-trip back to our own server needed. Best-effort: any
+    failure here is logged and swallowed — the /stream and /hls
+    endpoints in server.py self-heal by starting the same jobs on first
+    request if nothing landed here."""
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                f"{internal_base}/internal/preprocess/{file_id}",
-                params={"token": config.API_SECRET_TOKEN},
-            )
+        source, _ = await tg_resolve.resolve(file_id)
     except Exception as exc:
-        logger.debug("Preprocess trigger skipped for %s: %s", file_id, exc)
+        logger.debug("Could not resolve %s for preprocessing: %s", file_id, exc)
+        return
+
+    if config.ENABLE_REMUX and remux.is_eligible(source):
+        asyncio.create_task(remux.ensure_remuxed(file_id, source))
+    if config.ENABLE_HLS and hls.is_eligible(source):
+        asyncio.create_task(hls.ensure_packaged(file_id, source, media_type))
 
 
 def _format_size(size_bytes: int | None) -> str:
@@ -148,13 +157,16 @@ async def _help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     text = (
         "📖 <b>How to use this bot:</b>\n\n"
         "1️⃣  Send me any video, audio, or photo file\n"
-        "2️⃣  I'll give you a <b>stream URL</b> and a <b>player link</b>\n"
+        "2️⃣  I'll give you an <b>HLS stream link</b> plus a <b>direct link</b> and a <b>player link</b>\n"
         "3️⃣  Share the link or embed it in your website\n\n"
         "💡 <b>Tips:</b>\n"
-        "• Stream URLs work directly in <code>&lt;video&gt;</code> / "
-        "<code>&lt;audio&gt;</code> tags\n"
-        "• The player link opens a built-in web player with Plyr.js\n"
-        "• Full seeking / scrubbing is supported via HTTP Range requests\n"
+        "• The HLS link (<code>.m3u8</code>) plays with adaptive, segment-based "
+        "seeking — use it with hls.js in the browser, or open it directly in "
+        "VLC/mpv\n"
+        "• The direct link works in plain <code>&lt;video&gt;</code> / "
+        "<code>&lt;audio&gt;</code> tags and supports HTTP Range seeking too\n"
+        "• Big files take a few seconds to finish packaging after upload — "
+        "if a link 202s, just retry shortly\n"
         "• Bot API file size limit is 20 MB (50 MB with Telegram Premium)"
     )
     await update.message.reply_text(text, parse_mode="HTML")  # type: ignore[union-attr]
@@ -165,15 +177,16 @@ async def _about(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.effective_user or not _is_allowed(update.effective_user.id):
         return
     text = (
-        "📡 <b>Telegram Stream Bot</b> v2.1\n\n"
-        "A low-storage video/audio streaming proxy.\n"
+        "📡 <b>Telegram Stream Bot</b> v3.0\n\n"
+        "A low-storage video/audio streaming proxy with real HLS support.\n"
         "Files are streamed directly from Telegram servers — "
-        "no permanent disk cache, no bandwidth waste.\n\n"
-        "🛠 <b>Stack:</b> Python • FastAPI • python-telegram-bot\n"
-        "🌐 <b>Player:</b> Plyr.js with range-request seeking\n"
-        "🔒 <b>Auth:</b> Token-based stream URL protection\n"
-        "✨ <b>Smooth playback:</b> videos are auto-fixed in the background "
-        "(fast-start remux) so playback doesn't glitch on first frame"
+        "no permanent disk cache beyond the small packaged-segment cache.\n\n"
+        "🛠 <b>Stack:</b> Python • FastAPI • python-telegram-bot • ffmpeg\n"
+        "📺 <b>HLS:</b> .m3u8 + .ts segments, packaged in the background per upload\n"
+        "🌐 <b>Player:</b> hls.js (with native Safari/iOS HLS support)\n"
+        "🔒 <b>Auth:</b> Token-based URL protection on every route\n"
+        "✨ <b>Smooth playback:</b> HLS sidesteps the classic MP4 \"moov atom\" "
+        "flicker entirely; the direct link also gets a fast-start fix as a fallback"
     )
     await update.message.reply_text(text, parse_mode="HTML")  # type: ignore[union-attr]
 
@@ -278,9 +291,13 @@ async def _handle_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     size_str = _format_size(tg_file.file_size)
     emoji = _TYPE_EMOJI.get(media_type, "📄")
 
-    # Kick off the fast-start fix in the background — fire-and-forget,
-    # never blocks the reply below. Harmless no-op for audio/photos.
-    asyncio.create_task(_trigger_preprocess(file_id))
+    hls_eligible = config.ENABLE_HLS and media_type in ("video", "audio")
+    hls_url = _build_hls_url(file_id) if hls_eligible else None
+    hls_player_url = _build_hls_player_url(file_id) if hls_eligible else None
+
+    # Kick off the fast-start + HLS fixes in the background — fire-and-
+    # forget, never blocks the reply below. Harmless no-op for photos.
+    asyncio.create_task(_start_background_jobs(file_id, media_type))
 
     # Guess MIME for the informational reply
     mime_guess = guess_type(filename)[0] or "application/octet-stream"
@@ -291,32 +308,42 @@ async def _handle_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         f"🎞 <b>MIME:</b> <code>{mime_guess}</code>\n"
         f"📦 <b>Size:</b> {size_str}\n"
         f"🏷 <b>Type:</b> {media_type.capitalize()}\n\n"
-        f"🔗 <b>Stream URL:</b>\n<code>{stream_url}</code>\n\n"
-        f"📋 <b>Embed:</b>\n"
     )
 
-    if media_type == "video":
-        reply += f'<code>&lt;video src="{stream_url}" controls&gt;&lt;/video&gt;</code>'
-    elif media_type == "audio":
-        reply += f'<code>&lt;audio src="{stream_url}" controls&gt;&lt;/audio&gt;</code>'
-    elif media_type == "photo":
-        reply += f'<code>&lt;img src="{stream_url}" /&gt;</code>'
+    if hls_eligible:
+        reply += (
+            f"📺 <b>HLS Stream</b> (smooth seeking, no flicker):\n<code>{hls_url}</code>\n"
+            f"<i>Packaging in the background — first open may take a few seconds for big files, "
+            f"just retry once it's ready.</i>\n\n"
+            f"🔗 <b>Direct link</b> (for downloading / external players):\n<code>{stream_url}</code>\n\n"
+            f"📋 <b>Embed (hls.js):</b>\n"
+            f"<code>const v=document.querySelector('video');\n"
+            f"const hls=new Hls();hls.loadSource('{hls_url}');hls.attachMedia(v);</code>"
+        )
+    else:
+        reply += f"🔗 <b>Stream URL:</b>\n<code>{stream_url}</code>\n\n📋 <b>Embed:</b>\n"
+        if media_type == "photo":
+            reply += f'<code>&lt;img src="{stream_url}" /&gt;</code>'
+        else:
+            reply += f'<code>&lt;video src="{stream_url}" controls&gt;&lt;/video&gt;</code>'
 
     # Inline keyboard with buttons
-    keyboard = InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("🔗 Stream Direct", url=stream_url),
-                InlineKeyboardButton("▶️ Play in Browser", url=player_url),
-            ]
-        ]
-    )
+    primary_player_url = hls_player_url or player_url
+    rows = [[InlineKeyboardButton("▶️ Play in Browser", url=primary_player_url)]]
+    if hls_eligible:
+        rows.append([
+            InlineKeyboardButton("📺 HLS Manifest", url=hls_url),
+            InlineKeyboardButton("🔗 Direct Link", url=stream_url),
+        ])
+    else:
+        rows.append([InlineKeyboardButton("🔗 Direct Link", url=stream_url)])
+    keyboard = InlineKeyboardMarkup(rows)
 
     await msg.reply_text(reply, parse_mode="HTML", reply_markup=keyboard)
     _files_served += 1
     logger.info(
-        "Served stream link for file_id=%s (%s, %s, %s)",
-        file_id, filename, media_type, size_str,
+        "Served stream link for file_id=%s (%s, %s, %s, hls=%s)",
+        file_id, filename, media_type, size_str, hls_eligible,
     )
 
 

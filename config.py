@@ -25,6 +25,13 @@ Optional env vars:
     REMUX_CACHE_DIR    – Where fixed copies are cached (default /tmp/stream_cache).
     REMUX_CACHE_MAX_GB – Max total size of that cache before old entries
                          are evicted, in GB (default 8).
+    ENABLE_HLS         – "true" (default) to package uploads as HLS
+                         (.m3u8 + .ts segments) for smooth, seekable
+                         playback. Requires `ffmpeg`.
+    HLS_CACHE_DIR      – Where HLS packages are cached (default /tmp/hls_cache).
+    HLS_CACHE_MAX_GB   – Max total size of that cache before old packages
+                         are evicted, in GB (default 12).
+    HLS_SEGMENT_SECONDS – Target segment length in seconds (default 6).
 """
 
 from __future__ import annotations
@@ -66,6 +73,12 @@ ENABLE_REMUX: bool = os.getenv("ENABLE_REMUX", "true").lower() in ("1", "true", 
 REMUX_CACHE_DIR: str = os.getenv("REMUX_CACHE_DIR", "/tmp/stream_cache")
 REMUX_CACHE_MAX_BYTES: int = int(float(os.getenv("REMUX_CACHE_MAX_GB", "8")) * 1024 ** 3)
 
+# ── HLS packaging (proper .m3u8 + .ts streaming — see hls.py) ──────
+ENABLE_HLS: bool = os.getenv("ENABLE_HLS", "true").lower() in ("1", "true", "yes")
+HLS_CACHE_DIR: str = os.getenv("HLS_CACHE_DIR", "/tmp/hls_cache")
+HLS_CACHE_MAX_BYTES: int = int(float(os.getenv("HLS_CACHE_MAX_GB", "12")) * 1024 ** 3)
+HLS_SEGMENT_SECONDS: int = int(os.getenv("HLS_SEGMENT_SECONDS", "6"))
+
 # ── Telegram File API base ──────────────────────────────────────────
 # Set this to your Local Telegram Bot API server to allow files > 20 MB.
 # e.g. http://localhost:8081
@@ -96,10 +109,11 @@ def validate() -> None:
             "Set this to your Telegram numeric ID for single-user mode."
         )
 
-    if ENABLE_REMUX and shutil.which("ffmpeg") is None:
+    if (ENABLE_REMUX or ENABLE_HLS) and shutil.which("ffmpeg") is None:
         logger.warning(
-            "ENABLE_REMUX is true but the `ffmpeg` binary was not found on PATH. "
-            "Videos will keep streaming with the original flicker issue until "
-            "ffmpeg is installed — see deployment notes (packages.txt / Dockerfile) "
-            "for your Hugging Face Space. Set ENABLE_REMUX=false to silence this."
+            "ENABLE_REMUX/ENABLE_HLS is true but the `ffmpeg` binary was not "
+            "found on PATH. Streams will fall back to the original (possibly "
+            "flickering) direct proxy until ffmpeg is installed — see "
+            "deployment notes (packages.txt / Dockerfile) for your Hugging "
+            "Face Space. Set ENABLE_REMUX=false / ENABLE_HLS=false to silence this."
         )
