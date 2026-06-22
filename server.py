@@ -84,6 +84,7 @@ app.add_middleware(
         "Accept-Ranges",
         "Content-Length",
         "Content-Type",
+        "Content-Disposition",
     ],
 )
 
@@ -242,6 +243,18 @@ def _guess_content_type(file_path: str) -> str:
         "webp": "image/webp",
         "bmp": "image/bmp",
     }.get(ext, "application/octet-stream")
+
+
+def _content_disposition(disposition_type: str, filename: str) -> str:
+    """Build a Content-Disposition header value that works for both old
+    clients (ASCII filename) and modern ones (full UTF-8 via RFC 5987),
+    with quotes/control characters stripped so the header can't break."""
+    from urllib.parse import quote as _urlquote
+
+    cleaned = "".join(ch for ch in filename if ch not in '"\r\n') or "file"
+    ascii_fallback = cleaned.encode("ascii", "ignore").decode("ascii") or "file"
+    encoded = _urlquote(cleaned)
+    return f'{disposition_type}; filename="{ascii_fallback}"; filename*=UTF-8\'\'{encoded}'
 
 
 # ── Root: serve the static player page ──────────────────────────────
@@ -408,14 +421,53 @@ async def hls_segment(file_id: str, segment_name: str, token: str = Query(defaul
 
 
 # ── Main streaming endpoint ─────────────────────────────────────────
+# Registered as TWO routes pointing at the same implementation:
+#   /stream/{file_id}/{filename}  — preferred: the filename in the path
+#                                   gives browsers, Telegram's in-app
+#                                   browser, and players like video.js a
+#                                   real extension to key off of, instead
+#                                   of guessing from a bare, extension-less
+#                                   URL (which is what made links download
+#                                   instead of play, and made video.js fail
+#                                   to pick a playback tech at all).
+#   /stream/{file_id}             — kept for backward compatibility with
+#                                   already-shared links; behaves the same,
+#                                   just without the filename hint.
+@app.api_route("/stream/{file_id}/{filename}", methods=["GET", "HEAD"], response_model=None)
+async def stream_video_named(
+    file_id: str,
+    filename: str,
+    request: Request,
+    token: str = Query(default=""),
+    download: bool = Query(default=False),
+) -> StreamingResponse | Response:
+    return await _stream_impl(file_id, request, token, download, filename)
+
+
 @app.api_route("/stream/{file_id}", methods=["GET", "HEAD"], response_model=None)
 async def stream_video(
     file_id: str,
     request: Request,
     token: str = Query(default=""),
+    download: bool = Query(default=False),
+) -> StreamingResponse | Response:
+    return await _stream_impl(file_id, request, token, download, None)
+
+
+async def _stream_impl(
+    file_id: str,
+    request: Request,
+    token: str,
+    download: bool,
+    filename: str | None,
 ) -> StreamingResponse | Response:
     """Stream a Telegram-hosted file to the browser with full Range
-    request support for seeking / scrubbing."""
+    request support for seeking / scrubbing.
+
+    download=False (default): Content-Disposition: inline — plays in
+    browser / embeds in <video>.
+    download=True: Content-Disposition: attachment — forces a Save As
+    dialog instead of trying to play it."""
 
     # ── Auth check ──────────────────────────────────────────────────
     if config.API_SECRET_TOKEN and token != config.API_SECRET_TOKEN:
@@ -440,6 +492,17 @@ async def stream_video(
             file_size = int(cl)
 
     content_type = _guess_content_type(source)
+    # The real original filename (when given via the path) is more
+    # trustworthy than Telegram's internal file_path, which is sometimes
+    # generic — prefer it for content-type guessing when it has a
+    # recognizable extension.
+    if filename:
+        named_type = _guess_content_type(filename)
+        if named_type != "application/octet-stream":
+            content_type = named_type
+
+    disposition_name = filename or os.path.basename(local_file_path or source.split("?", 1)[0]) or file_id
+    disposition = _content_disposition("attachment" if download else "inline", disposition_name)
 
     # ── Fast-start remux ─────────────────────────────────────────────
     # If a cleaned (moov-relocated) copy already exists, switch onto it —
@@ -453,7 +516,8 @@ async def stream_video(
             is_local_file = True
             local_file_path = str(cached)
             file_size = cached.stat().st_size
-            content_type = "video/mp4"
+            if not filename:
+                content_type = "video/mp4"
         else:
             asyncio.create_task(remux.ensure_remuxed(file_id, source))
 
@@ -462,6 +526,7 @@ async def stream_video(
         headers = {
             "Accept-Ranges": "bytes",
             "Content-Type": content_type,
+            "Content-Disposition": disposition,
             "Cache-Control": "no-cache",
         }
         if file_size > 0:
@@ -491,6 +556,7 @@ async def stream_video(
             "Accept-Ranges": "bytes",
             "Content-Length": str(content_length),
             "Content-Type": content_type,
+            "Content-Disposition": disposition,
             "Cache-Control": "no-cache",
         }
 
@@ -511,6 +577,7 @@ async def stream_video(
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Type": content_type,
+        "Content-Disposition": disposition,
         "Cache-Control": "no-cache",
     }
     if file_size > 0:

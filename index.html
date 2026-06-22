@@ -79,6 +79,7 @@
 
   var params = new URLSearchParams(window.location.search);
   var url = params.get("url");
+  var fallbackUrl = params.get("fallback");
 
   var statusEl = document.getElementById("status");
   var statusTextEl = document.getElementById("statusText");
@@ -148,8 +149,8 @@
     }
   }
 
-  function attachDirect() {
-    videoEl.src = url;
+  function attachDirect(srcUrl) {
+    videoEl.src = srcUrl;
     videoEl.addEventListener("loadedmetadata", function () {
       reveal();
       startPlyr();
@@ -161,7 +162,10 @@
 
   // For HLS links, the manifest endpoint returns 202 while ffmpeg is
   // still packaging the file in the background. Poll briefly instead
-  // of just failing — most uploads finish within a few seconds.
+  // of just failing — most uploads finish within a few seconds. If HLS
+  // never comes up (disabled server-side, unsupported codec, etc.) and
+  // a fallback URL was given, drop back to direct playback rather than
+  // leaving the viewer stuck on an error.
   function waitForHlsThenPlay(attempt) {
     attempt = attempt || 0;
     var maxAttempts = 30; // ~60s
@@ -172,6 +176,10 @@
         } else if (res.status === 202 && attempt < maxAttempts) {
           showLoading("Preparing your stream for smooth playback… (" + (attempt + 1) + ")");
           setTimeout(function () { waitForHlsThenPlay(attempt + 1); }, 2000);
+        } else if (fallbackUrl) {
+          console.warn("HLS unavailable (HTTP " + res.status + "), falling back to direct playback.");
+          showLoading("Switching to direct playback…");
+          attachDirect(fallbackUrl);
         } else if (res.status === 202) {
           showError("Still preparing after a while — try reopening the link from the bot in a bit.");
         } else {
@@ -180,7 +188,11 @@
       })
       .catch(function (err) {
         console.error(err);
-        showError("Couldn't reach the stream server.");
+        if (fallbackUrl) {
+          attachDirect(fallbackUrl);
+        } else {
+          showError("Couldn't reach the stream server.");
+        }
       });
   }
 
@@ -192,7 +204,7 @@
   if (isHlsUrl(url)) {
     waitForHlsThenPlay();
   } else {
-    attachDirect();
+    attachDirect(url);
   }
 })();
 </script>

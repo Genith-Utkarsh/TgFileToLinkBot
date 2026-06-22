@@ -54,14 +54,28 @@ def _is_allowed(user_id: int) -> bool:
     return config.ALLOWED_USER_ID == 0 or user_id == config.ALLOWED_USER_ID
 
 
-def _build_stream_url(file_id: str) -> str:
-    """Construct the raw streaming URL for a given Telegram file_id."""
-    return f"{config.BASE_URL}/stream/{file_id}?token={config.API_SECRET_TOKEN}"
+def _build_stream_url(file_id: str, filename: str | None = None, download: bool = False) -> str:
+    """Construct the streaming URL for a given Telegram file_id.
+
+    Including the original filename in the path (not just the file_id)
+    matters: browsers, Telegram's in-app browser, and players like
+    video.js all use the URL's apparent extension as a hint for whether
+    something is playable media or a generic download, and a bare
+    /stream/{file_id} URL has none. download=True asks the server for
+    Content-Disposition: attachment instead of inline, forcing a Save
+    As dialog instead of trying to play it."""
+    base = f"{config.BASE_URL}/stream/{file_id}"
+    if filename:
+        base += f"/{quote(filename, safe='')}"
+    qs = f"token={config.API_SECRET_TOKEN}"
+    if download:
+        qs += "&download=1"
+    return f"{base}?{qs}"
 
 
-def _build_player_url(file_id: str) -> str:
-    """Construct a browser player URL that auto-loads the stream."""
-    stream = _build_stream_url(file_id)
+def _build_player_url(file_id: str, filename: str | None = None) -> str:
+    """Construct a browser player URL that auto-loads the direct stream."""
+    stream = _build_stream_url(file_id, filename)
     return f"{config.BASE_URL}/?url={quote(stream, safe='')}"
 
 
@@ -70,9 +84,18 @@ def _build_hls_url(file_id: str) -> str:
     return f"{config.BASE_URL}/hls/{file_id}/{hls.PLAYLIST_NAME}?token={config.API_SECRET_TOKEN}"
 
 
-def _build_hls_player_url(file_id: str) -> str:
-    """Construct a browser player URL that loads the HLS manifest via hls.js."""
-    return f"{config.BASE_URL}/?url={quote(_build_hls_url(file_id), safe='')}"
+def _build_hls_player_url(file_id: str, filename: str | None = None) -> str:
+    """Construct a browser player URL that loads the HLS manifest via
+    hls.js, with the direct link passed as a &fallback= so the player
+    page can recover automatically (e.g. packaging failed for this
+    file's codec, or HLS is mid-retry past its limit) instead of just
+    dead-ending on an error."""
+    hls_url = _build_hls_url(file_id)
+    fallback_url = _build_stream_url(file_id, filename)
+    return (
+        f"{config.BASE_URL}/?url={quote(hls_url, safe='')}"
+        f"&fallback={quote(fallback_url, safe='')}"
+    )
 
 
 async def _start_background_jobs(file_id: str, media_type: str) -> None:
@@ -286,20 +309,23 @@ async def _handle_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
 
     file_id = tg_file_obj.file_id
-    stream_url = _build_stream_url(file_id)
-    player_url = _build_player_url(file_id)
+    stream_url = _build_stream_url(file_id, filename)
+    download_url = _build_stream_url(file_id, filename, download=True)
+    player_url = _build_player_url(file_id, filename)
     size_str = _format_size(tg_file.file_size)
     emoji = _TYPE_EMOJI.get(media_type, "📄")
 
     hls_eligible = config.ENABLE_HLS and media_type in ("video", "audio")
     hls_url = _build_hls_url(file_id) if hls_eligible else None
-    hls_player_url = _build_hls_player_url(file_id) if hls_eligible else None
+    hls_player_url = _build_hls_player_url(file_id, filename) if hls_eligible else None
 
     # Kick off the fast-start + HLS fixes in the background — fire-and-
     # forget, never blocks the reply below. Harmless no-op for photos.
     asyncio.create_task(_start_background_jobs(file_id, media_type))
 
-    # Guess MIME for the informational reply
+    # Guess MIME for the informational reply — and for the embed
+    # snippets below, which set type= explicitly rather than relying on
+    # the player to sniff it from the URL.
     mime_guess = guess_type(filename)[0] or "application/octet-stream"
 
     reply = (
@@ -315,28 +341,41 @@ async def _handle_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             f"📺 <b>HLS Stream</b> (smooth seeking, no flicker):\n<code>{hls_url}</code>\n"
             f"<i>Packaging in the background — first open may take a few seconds for big files, "
             f"just retry once it's ready.</i>\n\n"
-            f"🔗 <b>Direct link</b> (for downloading / external players):\n<code>{stream_url}</code>\n\n"
-            f"📋 <b>Embed (hls.js):</b>\n"
-            f"<code>const v=document.querySelector('video');\n"
-            f"const hls=new Hls();hls.loadSource('{hls_url}');hls.attachMedia(v);</code>"
         )
+
+    reply += (
+        f"🎬 <b>Stream</b> (plays inline — use this in &lt;video&gt;/video.js):\n<code>{stream_url}</code>\n\n"
+        f"⬇️ <b>Download</b> (forces Save As instead of playing):\n<code>{download_url}</code>\n\n"
+        f"📋 <b>Embed:</b>\n"
+    )
+
+    if media_type == "photo":
+        reply += f'<code>&lt;img src="{stream_url}" /&gt;</code>'
+    elif media_type == "audio":
+        reply += f'<code>&lt;audio controls&gt;\n  &lt;source src="{stream_url}" type="{mime_guess}"&gt;\n&lt;/audio&gt;</code>'
     else:
-        reply += f"🔗 <b>Stream URL:</b>\n<code>{stream_url}</code>\n\n📋 <b>Embed:</b>\n"
-        if media_type == "photo":
-            reply += f'<code>&lt;img src="{stream_url}" /&gt;</code>'
-        else:
-            reply += f'<code>&lt;video src="{stream_url}" controls&gt;&lt;/video&gt;</code>'
+        reply += (
+            f'<code>&lt;video controls&gt;\n  &lt;source src="{stream_url}" type="{mime_guess}"&gt;\n&lt;/video&gt;</code>\n\n'
+            f"<i>video.js needs that type= attribute (or hls.js for the HLS link above) "
+            f"to know how to play it — a bare src= without it is why embeds sometimes don't load.</i>"
+        )
+        if hls_eligible:
+            reply += (
+                f"\n\n📋 <b>video.js with HLS (recommended — needs the VHS tech, built into video.js 7/8):</b>\n"
+                f'<code>&lt;source src="{hls_url}" type="application/x-mpegURL"&gt;</code>'
+            )
 
     # Inline keyboard with buttons
     primary_player_url = hls_player_url or player_url
-    rows = [[InlineKeyboardButton("▶️ Play in Browser", url=primary_player_url)]]
+    rows = [
+        [InlineKeyboardButton("▶️ Play in Browser", url=primary_player_url)],
+        [
+            InlineKeyboardButton("🎬 Stream", url=stream_url),
+            InlineKeyboardButton("⬇️ Download", url=download_url),
+        ],
+    ]
     if hls_eligible:
-        rows.append([
-            InlineKeyboardButton("📺 HLS Manifest", url=hls_url),
-            InlineKeyboardButton("🔗 Direct Link", url=stream_url),
-        ])
-    else:
-        rows.append([InlineKeyboardButton("🔗 Direct Link", url=stream_url)])
+        rows.append([InlineKeyboardButton("📺 HLS Manifest", url=hls_url)])
     keyboard = InlineKeyboardMarkup(rows)
 
     await msg.reply_text(reply, parse_mode="HTML", reply_markup=keyboard)
